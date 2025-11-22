@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AAC 轉 M4A 本地轉換器</title>
+    
+    <!-- 嘗試透過 Meta Tag 宣告 COOP/COEP (部分靜態伺服器支援) -->
+    <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin">
+    <meta http-equiv="Cross-Origin-Embedder-Policy" content="require-corp">
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Phosphor Icons -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    
+    <!-- FFmpeg.wasm v0.10.1 (較穩定的舊版本) -->
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.10.1/dist/ffmpeg.min.js"></script>
+
+    <style>
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col font-sans selection:bg-blue-100 selection:text-blue-900">
+
+    <!-- Header -->
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm">
+        <div class="max-w-4xl mx-auto px-4 h-16 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+                <i class="ph-fill ph-file-audio text-3xl text-blue-600"></i>
+                <h1 class="font-bold text-xl tracking-tight">AAC <span class="text-slate-400 text-base font-normal">to</span> M4A <span class="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full ml-1">WASM v0.10</span></h1>
+            </div>
+            <div id="engine-status" class="flex items-center gap-2 text-xs font-medium text-amber-600">
+                <span class="relative flex h-2 w-2">
+                  <span id="status-dot" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                  <span id="status-dot-static" class="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+                </span>
+                <span id="status-text">正在初始化...</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="flex-grow container mx-auto max-w-3xl px-4 py-8">
+        
+        <!-- Critical Error Alert (Hidden by default) -->
+        <div id="error-alert" class="hidden bg-red-50 border-l-4 border-red-500 p-4 mb-6 rounded-r shadow-sm">
+            <div class="flex items-start">
+                <div class="flex-shrink-0">
+                    <i class="ph-fill ph-warning-circle text-red-500 text-xl"></i>
+                </div>
+                <div class="ml-3">
+                    <h3 class="text-sm font-medium text-red-800">瀏覽器環境限制 (SharedArrayBuffer)</h3>
+                    <div class="mt-2 text-sm text-red-700 leading-relaxed">
+                        <p>您的瀏覽器或目前環境不支援 <code>SharedArrayBuffer</code>，這是 FFmpeg.wasm 運作所需的組件。</p>
+                        <p class="mt-2 font-semibold">解決方案：</p>
+                        <ul class="list-disc list-inside ml-2 mt-1 space-y-1 text-xs">
+                            <li>請勿直接雙擊開啟 HTML，請使用支援 HTTPS 的伺服器。</li>
+                            <li>如果您是開發者，請確保伺服器回應標頭包含：<br>
+                                <code>Cross-Origin-Opener-Policy: same-origin</code><br>
+                                <code>Cross-Origin-Embedder-Policy: require-corp</code>
+                            </li>
+                            <li>嘗試使用 Chrome/Edge 的最新版本。</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Introduction -->
+        <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 mb-6">
+            <h2 class="text-lg font-semibold mb-2 flex items-center gap-2">
+                <i class="ph ph-info text-blue-500"></i>
+                關於此工具
+            </h2>
+            <p class="text-slate-600 text-sm leading-relaxed">
+                此工具使用 <strong>FFmpeg.wasm</strong> 將 AAC 封裝轉為 M4A。
+                <br>
+                <span class="text-xs text-slate-400 mt-1 block">* 注意：首次載入可能需要下載約 25MB 的核心檔案。</span>
+            </p>
+        </div>
+
+        <!-- Upload Zone -->
+        <div id="drop-zone" class="relative group cursor-pointer">
+            <input type="file" id="file-input" accept=".aac" class="absolute inset-0 w-full h-full opacity-0 z-20 cursor-pointer" disabled />
+            
+            <div class="border-2 border-dashed border-slate-300 rounded-xl p-10 text-center transition-all duration-300 group-hover:border-blue-400 group-hover:bg-blue-50/50 bg-white" id="drop-zone-visual">
+                <div class="bg-blue-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-blue-600 transition-transform group-hover:scale-110">
+                    <i class="ph ph-upload-simple text-3xl"></i>
+                </div>
+                <h3 class="text-lg font-semibold text-slate-700 mb-1">點擊或拖曳 AAC 檔案至此</h3>
+                <p id="engine-wait-msg" class="text-xs text-amber-600 mt-4 font-medium">正在等待引擎初始化...</p>
+            </div>
+        </div>
+
+        <!-- Processing Area -->
+        <div id="process-area" class="hidden mt-8">
+            <div class="bg-white rounded-xl shadow-lg border border-slate-100 overflow-hidden">
+                <div class="p-6 border-b border-slate-100 flex items-center gap-4">
+                    <div class="w-12 h-12 bg-slate-100 rounded-lg flex items-center justify-center text-slate-500">
+                        <i class="ph-fill ph-file-audio text-2xl"></i>
+                    </div>
+                    <div class="flex-grow min-w-0">
+                        <h4 id="file-name" class="font-medium text-slate-800 truncate">filename.aac</h4>
+                        <p id="file-size" class="text-xs text-slate-500">0 MB</p>
+                    </div>
+                    <div class="shrink-0">
+                        <span class="text-xs font-bold text-slate-400 tracking-wider border border-slate-200 px-2 py-1 rounded">AAC</span>
+                        <i class="ph-bold ph-arrow-right text-slate-400 mx-2"></i>
+                        <span class="text-xs font-bold text-blue-600 tracking-wider border border-blue-200 bg-blue-50 px-2 py-1 rounded">M4A</span>
+                    </div>
+                </div>
+
+                <div class="p-6 bg-slate-50/50">
+                    <div id="progress-container" class="hidden mb-4">
+                        <div class="flex justify-between text-xs mb-1">
+                            <span class="font-medium text-slate-600">處理中...</span>
+                            <span class="font-medium text-blue-600" id="progress-text">0%</span>
+                        </div>
+                        <div class="w-full bg-slate-200 rounded-full h-2 overflow-hidden">
+                            <div id="progress-bar" class="bg-blue-600 h-2 rounded-full transition-all duration-300 w-0"></div>
+                        </div>
+                    </div>
+
+                    <div class="mb-4">
+                        <button id="toggle-logs" class="text-xs text-slate-500 hover:text-blue-600 flex items-center gap-1 mb-2 focus:outline-none">
+                            <i class="ph ph-caret-right" id="log-caret"></i>
+                            顯示處理日誌
+                        </button>
+                        <div id="log-container" class="hidden bg-slate-900 text-green-400 font-mono text-xs p-3 rounded-lg h-32 overflow-y-auto leading-tight">
+                            <div class="text-slate-500 select-none">--- FFmpeg Log Start ---</div>
+                        </div>
+                    </div>
+
+                    <div class="flex gap-3">
+                        <button id="convert-btn" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 px-4 rounded-lg transition-colors shadow-md hover:shadow-lg flex items-center justify-center gap-2">
+                            <i class="ph-bold ph-arrows-left-right"></i>
+                            開始轉換
+                        </button>
+                        <a id="download-btn" class="hidden flex-1 bg-green-600 hover:bg-green-700 text-white font-medium py-2.5 px-4 rounded-lg transition-colors shadow-md hover:shadow-lg flex items-center justify-center gap-2 text-center cursor-pointer download-link">
+                            <i class="ph-bold ph-download-simple"></i>
+                            下載 M4A
+                        </a>
+                        <button id="reset-btn" class="px-4 py-2.5 text-slate-600 hover:bg-slate-200 rounded-lg font-medium transition-colors">
+                            重置
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <script>
+        // Polyfill for SharedArrayBuffer to prevent immediate crash in some browsers
+        // This allows the script to load, though FFmpeg might still fail if it strictly needs Atomics
+        if (!window.SharedArrayBuffer) {
+            console.warn("SharedArrayBuffer is missing. Polyfilling with ArrayBuffer (Experimental).");
+            window.SharedArrayBuffer = window.ArrayBuffer;
+        }
+
+        const { createFFmpeg, fetchFile } = FFmpeg;
+        
+        // State
+        let ffmpeg = null;
+        let selectedFile = null;
+        let isEngineReady = false;
+
+        // DOM Elements
+        const els = {
+            fileInput: document.getElementById('file-input'),
+            dropZone: document.getElementById('drop-zone'),
+            dropZoneVisual: document.getElementById('drop-zone-visual'),
+            engineStatus: document.getElementById('engine-status'),
+            statusText: document.getElementById('status-text'),
+            statusDot: document.getElementById('status-dot'),
+            statusDotStatic: document.getElementById('status-dot-static'),
+            engineWaitMsg: document.getElementById('engine-wait-msg'),
+            processArea: document.getElementById('process-area'),
+            fileName: document.getElementById('file-name'),
+            fileSize: document.getElementById('file-size'),
+            convertBtn: document.getElementById('convert-btn'),
+            downloadBtn: document.getElementById('download-btn'),
+            resetBtn: document.getElementById('reset-btn'),
+            progressContainer: document.getElementById('progress-container'),
+            progressBar: document.getElementById('progress-bar'),
+            progressText: document.getElementById('progress-text'),
+            logContainer: document.getElementById('log-container'),
+            toggleLogs: document.getElementById('toggle-logs'),
+            logCaret: document.getElementById('log-caret'),
+            errorAlert: document.getElementById('error-alert')
+        };
+
+        // Initialize FFmpeg with Fallback Logic
+        const initFFmpeg = async () => {
+            try {
+                // Using v0.10.1 configuration
+                // corePath points to unpkg version 0.10.0 which is generally more stable for this
+                ffmpeg = createFFmpeg({ 
+                    log: true,
+                    corePath: 'https://unpkg.com/@ffmpeg/core@0.10.0/dist/ffmpeg-core.js',
+                });
+
+                ffmpeg.setLogger(({ type, message }) => {
+                    const div = document.createElement('div');
+                    div.textContent = `[${type}] ${message}`;
+                    els.logContainer.appendChild(div);
+                    els.logContainer.scrollTop = els.logContainer.scrollHeight;
+                });
+
+                await ffmpeg.load();
+                
+                isEngineReady = true;
+                els.statusText.textContent = '引擎就緒';
+                els.statusDot.classList.remove('bg-amber-400');
+                els.statusDot.classList.add('bg-green-400');
+                els.statusDotStatic.classList.replace('bg-amber-500', 'bg-green-500');
+                els.engineStatus.classList.replace('text-amber-600', 'text-green-600');
+                
+                els.engineWaitMsg.style.display = 'none';
+                els.fileInput.disabled = false;
+                
+            } catch (error) {
+                console.error("FFmpeg Load Error:", error);
+                els.errorAlert.classList.remove('hidden');
+                els.engineStatus.innerHTML = '<span class="text-red-500 font-bold">⚠️ 載入失敗</span>';
+                els.engineWaitMsg.innerHTML = '引擎初始化失敗，請查看上方錯誤訊息。';
+                els.engineWaitMsg.classList.add('text-red-500');
+                
+                // Specifically check for SharedArrayBuffer error string
+                if (error.message && (error.message.includes("SharedArrayBuffer") || error.message.includes("ReferenceError"))) {
+                    // The Alert is already shown, which explains this exact issue
+                }
+            }
+        };
+
+        // Helper: Format Bytes
+        const formatSize = (bytes) => {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        };
+
+        // Event Listeners
+        els.fileInput.addEventListener('change', (e) => {
+            if (e.target.files && e.target.files[0]) {
+                handleFileSelection(e.target.files[0]);
+            }
+        });
+
+        els.dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            if (!isEngineReady) return;
+            els.dropZoneVisual.classList.add('border-blue-500', 'bg-blue-50');
+        });
+        
+        els.dropZone.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            els.dropZoneVisual.classList.remove('border-blue-500', 'bg-blue-50');
+        });
+
+        els.dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            els.dropZoneVisual.classList.remove('border-blue-500', 'bg-blue-50');
+            if (!isEngineReady) return;
+            
+            if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                const file = e.dataTransfer.files[0];
+                if (file.name.toLowerCase().endsWith('.aac')) {
+                    handleFileSelection(file);
+                } else {
+                    alert('請只上傳 .aac 檔案');
+                }
+            }
+        });
+
+        const handleFileSelection = (file) => {
+            selectedFile = file;
+            els.dropZone.classList.add('hidden');
+            els.processArea.classList.remove('hidden');
+            els.fileName.textContent = file.name;
+            els.fileSize.textContent = formatSize(file.size);
+            
+            els.convertBtn.classList.remove('hidden');
+            els.downloadBtn.classList.add('hidden');
+            els.progressContainer.classList.add('hidden');
+            els.logContainer.innerHTML = '';
+        };
+
+        els.resetBtn.addEventListener('click', () => {
+            selectedFile = null;
+            els.fileInput.value = '';
+            els.processArea.classList.add('hidden');
+            els.dropZone.classList.remove('hidden');
+        });
+
+        els.toggleLogs.addEventListener('click', () => {
+            els.logContainer.classList.toggle('hidden');
+            const isHidden = els.logContainer.classList.contains('hidden');
+            els.logCaret.classList.toggle('ph-caret-right', isHidden);
+            els.logCaret.classList.toggle('ph-caret-down', !isHidden);
+            els.toggleLogs.childNodes[2].textContent = isHidden ? ' 顯示處理日誌' : ' 隱藏處理日誌';
+        });
+
+        els.convertBtn.addEventListener('click', async () => {
+            if (!selectedFile || !ffmpeg) return;
+
+            els.convertBtn.disabled = true;
+            els.convertBtn.classList.add('opacity-50', 'cursor-not-allowed');
+            els.convertBtn.innerHTML = '<i class="ph ph-spinner animate-spin"></i> 處理中...';
+            els.progressContainer.classList.remove('hidden');
+
+            try {
+                const inputName = 'input.aac';
+                const outputName = 'output.m4a';
+
+                ffmpeg.FS('writeFile', inputName, await fetchFile(selectedFile));
+
+                await ffmpeg.run('-i', inputName, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', outputName);
+
+                const data = ffmpeg.FS('readFile', outputName);
+                const url = URL.createObjectURL(new Blob([data.buffer], { type: 'audio/mp4' }));
+                
+                els.convertBtn.classList.add('hidden');
+                els.downloadBtn.href = url;
+                els.downloadBtn.download = selectedFile.name.replace(/\.aac$/i, '.m4a');
+                els.downloadBtn.classList.remove('hidden');
+                
+                els.progressText.textContent = '100%';
+                els.progressBar.style.width = '100%';
+                els.progressBar.classList.replace('bg-blue-600', 'bg-green-500');
+
+            } catch (error) {
+                console.error(error);
+                alert('轉換過程中發生錯誤，請查看日誌。如果是 SharedArrayBuffer 錯誤，請參考頁面頂部的警告。');
+                els.convertBtn.disabled = false;
+                els.convertBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+                els.convertBtn.innerHTML = '<i class="ph-bold ph-arrows-left-right"></i> 重試';
+            }
+        });
+
+        initFFmpeg();
+
+    </script>
+</body>
+</html>
